@@ -291,6 +291,24 @@ watch_loop() {
 }
 
 peer_status() {
+  local cache_file="/tmp/openclash_sync_peer_cache"
+  local cache_age=9999
+  if [ -f "$cache_file" ]; then
+    local now=$(date +%s)
+    local mtime=$(date -r "$cache_file" +%s 2>/dev/null || echo 0)
+    cache_age=$(( now - mtime ))
+  fi
+  if [ "$cache_age" -lt 60 ]; then
+    cat "$cache_file"
+    return
+  fi
+  local tmp="$cache_file.tmp.$$"
+  _peer_status_real > "$tmp" 2>/dev/null
+  mv "$tmp" "$cache_file" 2>/dev/null
+  cat "$cache_file"
+}
+
+_peer_status_real() {
   for sec in $(uci -q show "$CONFIG" | sed -n "s/^$CONFIG\.\([^=]*\)=node$/\1/p"); do
     local name host port user auth password key known en ssh_base last_sync node_state node_msg remote_info rc
     name="$(get_cfg "$sec" name "$sec")"

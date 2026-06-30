@@ -23,6 +23,7 @@ local function parse_peer_status(text)
 	return nodes
 end
 
+-- 读缓存（peer-status 带60秒缓存，不卡页面）
 local peer_raw = sys.exec("/usr/bin/openclash_sync.sh peer-status 2>&1")
 local peers = parse_peer_status(peer_raw)
 
@@ -51,42 +52,13 @@ end
 peer_rows[#peer_rows + 1] = "</tbody></table>"
 local peer_html = table.concat(peer_rows, "\n")
 
--- JS方案：页面加载后，把"全局设置"和"对端状态"两个section移入双栏容器
--- 通过section标题文本定位DOM元素
-top = m:section(NamedSection, "main", "openclash_sync", "")
-top.addremove = false
-top.anonymous = true
-t = top:option(DummyValue, "_top", "")
-t.rawhtml = true
-t.default = [[<div id="ocs-dual-container"></div>
-<script type="text/javascript">
-(function(){
-  var sections = document.querySelectorAll('.cbi-section');
-  var leftStart=-1, rightIdx=-1;
-  for(var i=0;i<sections.length;i++){
-    var h3 = sections[i].querySelector('h3');
-    if(!h3) continue;
-    var txt = h3.textContent || '';
-    if(txt.indexOf('全局设置')>=0 && leftStart<0) leftStart=i;
-    if(txt.indexOf('对端 OpenClash 状态')>=0) rightIdx=i;
-  }
-  if(leftStart>=0 && rightIdx>=0){
-    var wrap = document.createElement('div');
-    wrap.style.cssText='display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start';
-    var leftWrap = document.createElement('div');
-    leftWrap.style.cssText='flex:1;min-width:300px';
-    var rightWrap = document.createElement('div');
-    rightWrap.style.cssText='flex:1;min-width:300px';
-    sections[leftStart].parentNode.insertBefore(wrap, sections[leftStart]);
-    for(var i=leftStart;i<rightIdx;i++){
-      leftWrap.appendChild(sections[i]);
-    }
-    rightWrap.appendChild(sections[rightIdx]);
-    wrap.appendChild(leftWrap);
-    wrap.appendChild(rightWrap);
-  }
-})();
-</script>]]
+-- 对端状态（全局设置上方，纯表格无JS）
+peer_section = m:section(NamedSection, "main", "openclash_sync", translate("对端 OpenClash 状态"))
+peer_section.addremove = false
+peer_section.anonymous = true
+pv = peer_section:option(DummyValue, "_peer_status", "")
+pv.rawhtml = true
+pv.default = peer_html
 
 -- 全局设置
 s = m:section(NamedSection, "main", "openclash_sync", translate("全局设置"))
@@ -111,7 +83,6 @@ o = s:option(Value, "log_file", translate("日志文件"))
 o.default = "/var/log/openclash_sync.log"
 o.size = 28
 
--- 同步范围
 scope = m:section(NamedSection, "main", "openclash_sync", translate("同步范围"))
 scope.addremove = false
 scope.anonymous = true
@@ -132,17 +103,8 @@ for _, f in ipairs(flags) do
 	o.default = "1"
 end
 
--- 对端 OpenClash 状态
-peer_section = m:section(NamedSection, "main", "openclash_sync", translate("对端 OpenClash 状态"))
-peer_section.addremove = false
-peer_section.anonymous = true
-
-pv = peer_section:option(DummyValue, "_peer_status", "")
-pv.rawhtml = true
-pv.default = peer_html
-
--- 同步节点（一对多）
-n = m:section(TypedSection, "node", translate("同步节点（一对多）"), translate("可新增/删除多个对端节点，每次同步依次推送。"))
+-- 同步节点
+n = m:section(TypedSection, "node", translate("同步节点（一对多）"), translate("新增/删除对端节点，每次同步依次推送。"))
 n.addremove = true
 n.anonymous = true
 n.template = "cbi/tblsection"
@@ -160,8 +122,6 @@ function n.create(self, section)
 	m.uci:set("openclash_sync", sid, "known_hosts", "/root/.ssh/openclash_sync_known_hosts")
 	m.uci:set("openclash_sync", sid, "reload_remote", "1")
 	m.uci:set("openclash_sync", sid, "auto_deploy_openclash", "0")
-	m.uci:set("openclash_sync", sid, "force_reinstall_mismatch", "1")
-	m.uci:set("openclash_sync", sid, "backup_before_deploy", "1")
 	return sid
 end
 
@@ -206,16 +166,8 @@ o.default = "/root/.ssh/openclash_sync_known_hosts"
 o = n:option(Flag, "reload_remote", translate("同步后重载"))
 o.default = "1"
 
-o = n:option(Flag, "auto_deploy_openclash", translate("自动部署/修复"), translate("对端缺失或版本不一致时自动重装"))
+o = n:option(Flag, "auto_deploy_openclash", translate("自动部署/修复"), translate("对端缺失或版本不一致时自动部署"))
 o.default = "0"
-
-o = n:option(Flag, "force_reinstall_mismatch", translate("版本不一致重装"))
-o.default = "1"
-o:depends("auto_deploy_openclash", "1")
-
-o = n:option(Flag, "backup_before_deploy", translate("重装前备份"))
-o.default = "1"
-o:depends("auto_deploy_openclash", "1")
 
 function m.on_after_commit(self)
 	luci.sys.call("/etc/init.d/openclash_sync enable >/dev/null 2>&1")
