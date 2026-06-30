@@ -1,6 +1,94 @@
-m = Map("openclash_sync", translate("OpenClash Sync"), translate("将本机 OpenClash 配置实时同步到一台或多台 OpenWrt/iStoreOS 设备。"))
+local sys = require "luci.sys"
 
--- 全局设置：紧凑行间距 + 注释同行
+m = Map("openclash_sync", translate("OpenClash Sync"), translate("将本机 OpenClash 配置实时同步到一台或多台 OpenWrt/iStoreOS 设备。"))
+m:chain("openclash_sync")
+
+local function esc(s)
+	return luci.util.pcdata(s or "")
+end
+
+local function parse_peer_status(text)
+	local nodes = {}
+	local cur = nil
+	for line in (text or ""):gmatch("[^\r\n]+") do
+		if line == "BEGIN_NODE" then cur = {}
+		elseif line == "END_NODE" then
+			if cur then nodes[#nodes + 1] = cur end
+			cur = nil
+		elseif cur then
+			local k, v = line:match("^([^=]+)=(.*)$")
+			if k then cur[k] = v end
+		end
+	end
+	return nodes
+end
+
+local peer_raw = sys.exec("/usr/bin/openclash_sync.sh peer-status 2>&1")
+local peers = parse_peer_status(peer_raw)
+
+local peer_rows = {}
+peer_rows[#peer_rows + 1] = [[<table class="table" style="width:100%;font-size:12px;margin:0">
+<thead><tr>
+<th>节点</th><th>地址</th><th>连接</th><th>OpenClash</th><th>版本</th><th>最近同步</th><th>结果</th>
+</tr></thead><tbody>]]
+if #peers == 0 then
+	peer_rows[#peer_rows + 1] = "<tr><td colspan='7' style='text-align:center;color:#888'>暂无节点</td></tr>"
+else
+	for _, n in ipairs(peers) do
+		local reachable = n.peer_reachable or "未知"
+		local badge = reachable == "yes" and '<span style="color:#5cb85c">在线</span>' or (reachable == "disabled" and '<span style="color:#999">停</span>' or '<span style="color:#d9534f">离线</span>')
+		local oc_state = esc(n.openclash_state or "-")
+		if n.openclash_state == "running" then oc_state = '<span style="color:#5cb85c">运行</span>'
+		elseif n.openclash_state == "inactive" then oc_state = '<span style="color:#f0ad4e">停止</span>' end
+		local ts = n.last_sync ~= "" and n.last_sync or "-"
+		ts = ts:match("(%d+:%d+:%d+)$") or ts
+		peer_rows[#peer_rows + 1] = string.format(
+			"<tr><td>%s</td><td style='font-size:11px'>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s %s</td></tr>",
+			esc(n.name), esc(n.target), badge, oc_state, esc(n.openclash_version), esc(ts), esc(n.sync_state or "-"), esc(n.sync_message or "")
+		)
+	end
+end
+peer_rows[#peer_rows + 1] = "</tbody></table>"
+local peer_html = table.concat(peer_rows, "\n")
+
+-- JS方案：页面加载后，把"全局设置"和"对端状态"两个section移入双栏容器
+-- 通过section标题文本定位DOM元素
+top = m:section(NamedSection, "main", "openclash_sync", "")
+top.addremove = false
+top.anonymous = true
+t = top:option(DummyValue, "_top", "")
+t.rawhtml = true
+t.default = [[<div id="ocs-dual-container"></div>
+<script type="text/javascript">
+(function(){
+  var sections = document.querySelectorAll('.cbi-section');
+  var leftStart=-1, rightIdx=-1;
+  for(var i=0;i<sections.length;i++){
+    var h3 = sections[i].querySelector('h3');
+    if(!h3) continue;
+    var txt = h3.textContent || '';
+    if(txt.indexOf('全局设置')>=0 && leftStart<0) leftStart=i;
+    if(txt.indexOf('对端 OpenClash 状态')>=0) rightIdx=i;
+  }
+  if(leftStart>=0 && rightIdx>=0){
+    var wrap = document.createElement('div');
+    wrap.style.cssText='display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start';
+    var leftWrap = document.createElement('div');
+    leftWrap.style.cssText='flex:1;min-width:300px';
+    var rightWrap = document.createElement('div');
+    rightWrap.style.cssText='flex:1;min-width:300px';
+    sections[leftStart].parentNode.insertBefore(wrap, sections[leftStart]);
+    for(var i=leftStart;i<rightIdx;i++){
+      leftWrap.appendChild(sections[i]);
+    }
+    rightWrap.appendChild(sections[rightIdx]);
+    wrap.appendChild(leftWrap);
+    wrap.appendChild(rightWrap);
+  }
+})();
+</script>]]
+
+-- 全局设置
 s = m:section(NamedSection, "main", "openclash_sync", translate("全局设置"))
 s.addremove = false
 s.anonymous = true
@@ -21,9 +109,9 @@ o.size = 6
 
 o = s:option(Value, "log_file", translate("日志文件"))
 o.default = "/var/log/openclash_sync.log"
-o.size = 30
+o.size = 28
 
--- 同步范围：紧凑复选框
+-- 同步范围
 scope = m:section(NamedSection, "main", "openclash_sync", translate("同步范围"))
 scope.addremove = false
 scope.anonymous = true
@@ -43,6 +131,15 @@ for _, f in ipairs(flags) do
 	o = scope:option(Flag, f[1], f[2])
 	o.default = "1"
 end
+
+-- 对端 OpenClash 状态
+peer_section = m:section(NamedSection, "main", "openclash_sync", translate("对端 OpenClash 状态"))
+peer_section.addremove = false
+peer_section.anonymous = true
+
+pv = peer_section:option(DummyValue, "_peer_status", "")
+pv.rawhtml = true
+pv.default = peer_html
 
 -- 同步节点（一对多）
 n = m:section(TypedSection, "node", translate("同步节点（一对多）"), translate("可新增/删除多个对端节点，每次同步依次推送。"))

@@ -342,7 +342,10 @@ peer_status() {
       [ -z "$ver" ] && ver="未安装"
       if [ -x /etc/init.d/openclash ]; then
         st=$(/etc/init.d/openclash status 2>/dev/null || true)
-        [ -z "$st" ] && st=$(pgrep -f "clash" >/dev/null 2>&1 && echo running || echo inactive)
+        case "$st" in
+          running) ;;
+          *) pgrep -f "clash" >/dev/null 2>&1 && st=running || st=inactive ;;
+        esac
       else
         st="未安装"
       fi
