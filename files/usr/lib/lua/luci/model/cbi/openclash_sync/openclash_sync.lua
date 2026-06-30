@@ -33,27 +33,26 @@ if #peers == 0 then
 	lines[#lines + 1] = '<div style="color:#888;padding:8px">暂无节点</div>'
 else
 	lines[#lines + 1] = [[<table style="width:100%;border-collapse:collapse;font-size:12px">
-<tr style="background:#333;color:#fff;font-weight:bold">
-<td style="padding:6px 8px;border:1px solid #555">节点</td>
-<td style="padding:6px 8px;border:1px solid #555">地址</td>
-<td style="padding:6px 8px;border:1px solid #555">连接</td>
-<td style="padding:6px 8px;border:1px solid #555">OpenClash</td>
-<td style="padding:6px 8px;border:1px solid #555">版本</td>
-<td style="padding:6px 8px;border:1px solid #555">最近同步</td>
-<td style="padding:6px 8px;border:1px solid #555">结果</td>
+<tr style="font-weight:bold;border-bottom:2px solid">
+<td style="padding:6px 8px">节点</td>
+<td style="padding:6px 8px">地址</td>
+<td style="padding:6px 8px">连接</td>
+<td style="padding:6px 8px">OpenClash</td>
+<td style="padding:6px 8px">版本</td>
+<td style="padding:6px 8px">最近同步</td>
+<td style="padding:6px 8px">结果</td>
 </tr>]]
 	for i, n in ipairs(peers) do
 		local reachable = n.peer_reachable or "未知"
-		local badge = reachable == "yes" and '<span style="color:#5cb85c">在线</span>' or (reachable == "disabled" and '<span style="color:#999">停用</span>' or '<span style="color:#d9534f">离线</span>')
+		local badge = reachable == "yes" and '<span style="color:#5cb85c">在线</span>' or (reachable == "disabled" and "停用" or '<span style="color:#d9534f">离线</span>')
 		local oc = esc(n.openclash_state or "-")
 		if n.openclash_state == "running" then oc = '<span style="color:#5cb85c">运行</span>'
 		elseif n.openclash_state == "inactive" then oc = '<span style="color:#f0ad4e">停止</span>' end
 		local ts = n.last_sync ~= "" and n.last_sync or "-"
 		ts = ts:match("(%d+:%d+:%d+)$") or ts
-		local bg = i % 2 == 0 and '#252526' or '#1e1e1e'
 		lines[#lines + 1] = string.format(
-			'<tr style="background:%s"><td style="padding:5px 8px;border:1px solid #555">%s</td><td style="padding:5px 8px;border:1px solid #555">%s</td><td style="padding:5px 8px;border:1px solid #555">%s</td><td style="padding:5px 8px;border:1px solid #555">%s</td><td style="padding:5px 8px;border:1px solid #555">%s</td><td style="padding:5px 8px;border:1px solid #555">%s</td><td style="padding:5px 8px;border:1px solid #555">%s %s</td></tr>',
-			bg, esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or "")
+			'<tr><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s %s</td></tr>',
+			esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or "")
 		)
 	end
 	lines[#lines + 1] = '</table>'
