@@ -10,6 +10,7 @@ config openclash_sync 'main'
 	option sync_rule_provider_dir '1'
 	option sync_game_rules_dir '1'
 	option sync_root_assets '1'
+	option sync_selection '1'
 	option log_file '/var/log/openclash_sync.log'
 
 config node

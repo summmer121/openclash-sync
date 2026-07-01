@@ -25,6 +25,8 @@ function action()
 		out = sys.exec("/etc/init.d/openclash_sync restart 2>&1")
 	elseif act == "sync" then
 		out = sys.exec("/usr/bin/openclash_sync.sh once 2>&1")
+	elseif act == "refresh" then
+		out = sys.exec("rm -f /tmp/openclash_sync_peer_cache 2>/dev/null; /usr/bin/openclash_sync.sh peer-status 2>&1 >/dev/null; echo refreshed")
 	elseif act == "clearlog" then
 		out = sys.exec(">/var/log/openclash_sync.log 2>&1; echo log_cleared")
 	else

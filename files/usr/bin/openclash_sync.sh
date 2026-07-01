@@ -23,6 +23,10 @@ PERIODIC_SYNC="$(get_cfg "$MAIN" periodic_sync 0)"
 LOCK="/tmp/openclash_sync.lock"
 PENDING="/tmp/openclash_sync.pending"
 DEBOUNCE_LOCK="/tmp/openclash_sync.debounce"
+SELECT_LOCK="/tmp/openclash_sync.select.lock"
+SELECT_DEBOUNCE="/tmp/openclash_sync.select.debounce"
+CLASH_API="$(get_cfg "$MAIN" clash_api_port 9090)"
+SYNC_SELECTION="$(get_cfg "$MAIN" sync_selection 1)"
 
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
@@ -60,6 +64,104 @@ sync_dir_to_node() {
     --exclude='core/' --exclude='history/' --exclude='cache/' --exclude='run/' --exclude='logs/' \
     --exclude='backup/' --exclude='*.log' --exclude='*.pid' \
     "$src/" "$user@$host:$dst/" >>"$LOG" 2>&1
+}
+
+# ---- 节点选择同步 (方案A: 主设备切节点 -> 从设备跟切同名节点) ----
+# 读本机所有 Selector 组的当前选中，输出每组两行: 组名\n节点名
+_local_selections() {
+  local api="http://127.0.0.1:$CLASH_API"
+  local json="/tmp/openclash_sync_local_px.json"
+  curl -s -m5 "$api/proxies" > "$json" 2>/dev/null || return 1
+  local n now
+  for n in $(jsonfilter -i "$json" -e '@.proxies[@.type="Selector"].name' 2>/dev/null); do
+    now="$(jsonfilter -i "$json" -e "@.proxies[\"$n\"].now" 2>/dev/null)"
+    [ -n "$now" ] && printf '%s\n%s\n' "$n" "$now"
+  done
+}
+
+# 把本机选择推送到单个节点(在对端本地调用其自身 Clash API 切换)
+sync_selection_node() {
+  local sec="$1" selections="$2"
+  get_bool_sec "$sec" enabled 1 || return 0
+  local name host port user auth password key known ssh_base
+  name="$(get_cfg "$sec" name "$sec")"
+  host="$(get_cfg "$sec" remote_host '')"
+  port="$(get_cfg "$sec" remote_port 22)"
+  user="$(get_cfg "$sec" remote_user root)"
+  auth="$(get_cfg "$sec" auth_mode key)"
+  password="$(get_cfg "$sec" password '')"
+  key="$(get_cfg "$sec" ssh_key /root/.ssh/openclash_sync_openssh_ed25519)"
+  known="$(get_cfg "$sec" known_hosts /root/.ssh/openclash_sync_known_hosts)"
+  [ -z "$host" ] && return 1
+
+  if [ "$auth" = "password" ]; then
+    ssh_base="sshpass -p $password ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=$known -o ConnectTimeout=15 -p $port"
+  else
+    ssh_base="ssh -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=$known -o ConnectTimeout=15 -p $port"
+  fi
+
+  # 每组两行(组名/节点名)通过 stdin 传给对端，对端逐组 PUT 到自己的 9090
+  printf '%s\n' "$selections" | $ssh_base "$user@$host" '
+    api="http://127.0.0.1:'"$CLASH_API"'"
+    changed=0
+    while read grp; do
+      read node || break
+      [ -z "$grp" ] && continue
+      # 对端存在该组才切
+      cur=$(curl -s -m5 "$api/proxies/$grp" 2>/dev/null | jsonfilter -e "@.now" 2>/dev/null)
+      [ -z "$cur" ] && continue
+      [ "$cur" = "$node" ] && continue
+      code=$(curl -s -m8 -o /dev/null -w "%{http_code}" -X PUT --data "{\"name\":\"$node\"}" "$api/proxies/$grp" 2>/dev/null)
+      [ "$code" = "204" ] && changed=$((changed+1)) && echo "switched [$grp] -> $node"
+    done
+    echo "selection_changed=$changed"
+  ' >>"$LOG" 2>&1
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "[$name] selection synced"
+    node_status_set "$sec" ok "节点跟随同步完成"
+  else
+    log "[$name] selection sync failed (rc=$rc)"
+    node_status_set "$sec" error "节点跟随同步失败"
+  fi
+  return $rc
+}
+
+# 遍历所有启用节点，推送本机当前选择
+sync_selection() {
+  [ "$SYNC_SELECTION" = "1" ] || return 0
+  if ! mkdir "$SELECT_LOCK" 2>/dev/null; then
+    log "selection sync already running, skip"
+    return 0
+  fi
+  local selections
+  selections="$(_local_selections)"
+  if [ -z "$selections" ]; then
+    log "selection sync: no local selector groups, skip"
+    rmdir "$SELECT_LOCK" 2>/dev/null || true
+    return 0
+  fi
+  log "selection sync start: $(echo "$selections" | wc -l) group(s)"
+  local sec
+  for sec in $(uci -q show "$CONFIG" | sed -n "s/^$CONFIG\.\([^=]*\)=node$/\1/p"); do
+    if get_bool_sec "$sec" enabled 1; then
+      sync_selection_node "$sec" "$selections" || true
+    fi
+  done
+  log "selection sync done"
+  rmdir "$SELECT_LOCK" 2>/dev/null || true
+}
+
+# 防抖调度选择同步(独立于全量配置同步)
+schedule_selection() {
+  [ "$SYNC_SELECTION" = "1" ] || return 0
+  if mkdir "$SELECT_DEBOUNCE" 2>/dev/null; then
+    (
+      sleep 3
+      sync_selection
+      rmdir "$SELECT_DEBOUNCE" 2>/dev/null || true
+    ) &
+  fi
 }
 
 local_openclash_version() {
@@ -271,11 +373,9 @@ schedule_sync() {
 periodic_loop() {
   [ "${PERIODIC_SYNC:-0}" -gt 0 ] 2>/dev/null || { log "periodic safety sync disabled"; return 0; }
   log "periodic safety sync start, interval=${PERIODIC_SYNC}s"
-  trap 'kill "$SLEEP_PID" 2>/dev/null || true; exit 0' INT TERM
   while true; do
     sleep "$PERIODIC_SYNC" &
-    SLEEP_PID=$!
-    wait "$SLEEP_PID" 2>/dev/null || exit 0
+    wait $!
     log "periodic safety sync tick"
     sync_once
   done
@@ -284,9 +384,24 @@ periodic_loop() {
 watch_loop() {
   log "watch start (one-to-many monitor, change-trigger only)"
   status_set running "监听中，仅主设备变更时同步"
-  periodic_loop &
-  PERIODIC_PID=$!
-  trap 'kill "$PERIODIC_PID" 2>/dev/null || true; exit 0' INT TERM
+  trap 'exit 0' INT TERM
+
+  # 后台: 监听节点选择变化(history/*.db)，触发选择同步(方案A)
+  if [ "$SYNC_SELECTION" = "1" ]; then
+    (
+      log "selection watch start (history/*.db, modify)"
+      while true; do
+        inotifywait -m -e modify,close_write,create,move \
+          /etc/openclash/history 2>>"$LOG" | while read line; do
+            case "$line" in
+              *.db*) log "selection event $line"; schedule_selection ;;
+            esac
+          done
+        sleep 3
+      done
+    ) &
+  fi
+
   while true; do
     inotifywait -m -r -e close_write,create,delete,move,attrib \
       --exclude '(/etc/openclash/(core|history|cache|run|logs|backup)/|\.log$|\.pid$)' \
@@ -336,6 +451,7 @@ _peer_status_real() {
     echo "BEGIN_NODE"
     echo "section=$sec"
     echo "name=$name"
+    echo "probe_time=$(date '+%H:%M:%S')"
     echo "enabled=$en"
     echo "target=$user@$host:$port"
     echo "last_sync=$last_sync"
@@ -380,6 +496,30 @@ _peer_status_real() {
       echo "openclash_version=$ver"
       echo "openclash_state=$st"
       echo "openclash_enabled=$en"
+
+      # 国内网络：直连阿里DNS(不走代理)
+      cn_net="down"
+      if ping -c1 -W2 223.5.5.5 >/dev/null 2>&1; then
+        cn_net="up"
+      elif curl -s -m5 -o /dev/null http://www.baidu.com 2>/dev/null; then
+        cn_net="up"
+      fi
+      echo "cn_net=$cn_net"
+
+      # 科学上网：走 Clash 代理端口测 google 204
+      px_net="down"; px_ip=""
+      pport=$(uci -q get openclash.config.mixed_port 2>/dev/null)
+      [ -z "$pport" ] && pport=7890
+      for P in "$pport" 7890 7891 7892 7893; do
+        code=$(curl -s -m8 -x "http://127.0.0.1:$P" -o /dev/null -w "%{http_code}" https://www.google.com/generate_204 2>/dev/null)
+        if [ "$code" = "204" ] || [ "$code" = "200" ]; then
+          px_net="up"
+          px_ip=$(curl -s -m8 -x "http://127.0.0.1:$P" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n "s/^loc=//p")
+          break
+        fi
+      done
+      echo "px_net=$px_net"
+      echo "px_loc=$px_ip"
     ' 2>/dev/null)"
     rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -390,6 +530,9 @@ _peer_status_real() {
       echo "openclash_version=未知"
       echo "openclash_state=连接失败"
       echo "openclash_enabled=未知"
+      echo "cn_net=未知"
+      echo "px_net=未知"
+      echo "px_loc="
     fi
     echo "END_NODE"
   done
@@ -397,6 +540,7 @@ _peer_status_real() {
 
 case "$1" in
   once) sync_once ;;
+  sync-selection) sync_selection ;;
   status)
     echo "enabled=$(get_cfg "$MAIN" enabled 1)"
     echo "nodes_enabled=$(node_count_enabled)"
@@ -417,5 +561,5 @@ case "$1" in
     ;;
   peer-status) peer_status ;;
   watch|"") watch_loop ;;
-  *) echo "Usage: $0 [once|watch|status]"; exit 1 ;;
+  *) echo "Usage: $0 [once|sync-selection|watch|status|peer-status]"; exit 1 ;;
 esac

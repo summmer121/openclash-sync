@@ -1,4 +1,5 @@
 local sys = require "luci.sys"
+local disp = require "luci.dispatcher"
 
 m = Map("openclash_sync", translate("OpenClash Sync"), translate("将本机 OpenClash 配置实时同步到一台或多台 OpenWrt/iStoreOS 设备。"))
 m:chain("openclash_sync")
@@ -38,9 +39,12 @@ else
 <td style="padding:6px 8px">地址</td>
 <td style="padding:6px 8px">连接</td>
 <td style="padding:6px 8px">OpenClash</td>
+<td style="padding:6px 8px">国内网</td>
+<td style="padding:6px 8px">科学上网</td>
 <td style="padding:6px 8px">版本</td>
 <td style="padding:6px 8px">最近同步</td>
 <td style="padding:6px 8px">结果</td>
+<td style="padding:6px 8px">刷新时间</td>
 </tr>]]
 	for i, n in ipairs(peers) do
 		local reachable = n.peer_reachable or "未知"
@@ -48,15 +52,61 @@ else
 		local oc = esc(n.openclash_state or "-")
 		if n.openclash_state == "running" then oc = '<span style="color:#5cb85c">运行</span>'
 		elseif n.openclash_state == "inactive" then oc = '<span style="color:#f0ad4e">停止</span>' end
+		-- 国内网络
+		local cn = n.cn_net or "未知"
+		local cn_badge = cn == "up" and '<span style="color:#5cb85c">正常</span>'
+			or (cn == "未知" and '<span style="color:#999">未知</span>' or '<span style="color:#d9534f">异常</span>')
+		-- 科学上网
+		local px = n.px_net or "未知"
+		local px_txt = px == "up" and ('<span style="color:#5cb85c">通</span>' .. (n.px_loc and n.px_loc ~= "" and (' <span style="color:#888">' .. esc(n.px_loc) .. '</span>') or ''))
+			or (px == "未知" and '<span style="color:#999">未知</span>' or '<span style="color:#d9534f">不通</span>')
 		local ts = n.last_sync ~= "" and n.last_sync or "-"
 		ts = ts:match("(%d+:%d+:%d+)$") or ts
 		lines[#lines + 1] = string.format(
-			'<tr><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s %s</td></tr>',
-			esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or "")
+			'<tr><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s %s</td><td style="padding:5px 8px;color:#888">%s</td></tr>',
+			esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, cn_badge, px_txt, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or ""), esc(n.probe_time or "-")
 		)
 	end
 	lines[#lines + 1] = '</table>'
 end
+-- 操作按钮(重启服务 / 刷新状态)
+local act_url = disp.build_url("admin", "services", "openclash_sync", "action")
+lines[#lines + 1] = string.format([[
+<div style="margin-top:10px">
+<button type="button" class="btn cbi-button cbi-button-apply" id="ocs_btn_restart" style="margin-right:8px">重启服务</button>
+<button type="button" class="btn cbi-button cbi-button-reload" id="ocs_btn_refresh">刷新状态</button>
+<span id="ocs_act_msg" style="margin-left:10px;color:#888"></span>
+</div>
+<script type="text/javascript">
+(function(){
+	var url = "%s";
+	function doAct(act, label){
+		var msg = document.getElementById("ocs_act_msg");
+		msg.style.color = "#888";
+		msg.innerHTML = label + "中…";
+		var xhr = new XMLHttpRequest();
+		xhr.open("POST", url, true);
+		xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+		xhr.onreadystatechange = function(){
+			if(xhr.readyState === 4){
+				if(xhr.status === 200){
+					msg.style.color = "#5cb85c";
+					msg.innerHTML = label + "完成，正在刷新页面…";
+					setTimeout(function(){ location.reload(); }, 1500);
+				} else {
+					msg.style.color = "#d9534f";
+					msg.innerHTML = label + "失败 (HTTP " + xhr.status + ")";
+				}
+			}
+		};
+		xhr.send("do=" + encodeURIComponent(act));
+	}
+	var br = document.getElementById("ocs_btn_restart");
+	var bf = document.getElementById("ocs_btn_refresh");
+	if(br) br.onclick = function(){ doAct("restart", "重启服务"); };
+	if(bf) bf.onclick = function(){ doAct("refresh", "刷新状态"); };
+})();
+</script>]], act_url)
 local peer_html = table.concat(lines, "\n")
 
 -- 对端状态
@@ -81,9 +131,9 @@ o.datatype = "uinteger"
 o.default = "5"
 o.size = 4
 
-o = s:option(Value, "periodic_sync", translate("兜底周期(秒)"), translate("0=关闭；仅需要周期补偿时再启用，默认只监听主设备变更"))
+o = s:option(Value, "periodic_sync", translate("兜底周期(秒)"), translate("重启/断网恢复后自动补偿"))
 o.datatype = "uinteger"
-o.default = "0"
+o.default = "300"
 o.size = 6
 
 o = s:option(Value, "log_file", translate("日志文件"))
@@ -173,7 +223,7 @@ o.default = "/root/.ssh/openclash_sync_known_hosts"
 o = n:option(Flag, "reload_remote", translate("同步后重载"))
 o.default = "1"
 
-o = n:option(Flag, "auto_deploy_openclash", translate("自动部署/修复"), translate("高风险选项，默认关闭；仅在确认需要由主设备重装对端 OpenClash 时启用"))
+o = n:option(Flag, "auto_deploy_openclash", translate("自动部署/修复"), translate("对端缺失或版本不一致时自动部署"))
 o.default = "0"
 
 function m.on_after_commit(self)
