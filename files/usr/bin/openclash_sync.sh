@@ -19,7 +19,7 @@ get_bool_sec() {
 
 LOG="$(get_cfg "$MAIN" log_file /var/log/openclash_sync.log)"
 DEBOUNCE="$(get_cfg "$MAIN" debounce 5)"
-PERIODIC_SYNC="$(get_cfg "$MAIN" periodic_sync 300)"
+PERIODIC_SYNC="$(get_cfg "$MAIN" periodic_sync 0)"
 LOCK="/tmp/openclash_sync.lock"
 PENDING="/tmp/openclash_sync.pending"
 DEBOUNCE_LOCK="/tmp/openclash_sync.debounce"
@@ -89,16 +89,25 @@ ensure_remote_openclash() {
   local sec="$1" name="$2" ssh_base="$3" rsync_ssh="$4" user="$5" host="$6"
   get_bool_sec "$sec" auto_deploy_openclash 0 || return 0
 
-  local local_ver remote_ver need_deploy backup force payload ts
+  local local_ver remote_ver remote_rc remote_tmp need_deploy force payload
   local_ver="$(local_openclash_version)"
   [ -n "$local_ver" ] || { log "[$name] local OpenClash package not found"; node_status_set "$sec" error "本机未安装 luci-app-openclash"; return 1; }
 
-  remote_ver="$($ssh_base "$user@$host" "opkg list-installed 2>/dev/null | awk '\''\$1==\"luci-app-openclash\"{print \$3; exit}'\''; [ -f /usr/lib/opkg/info/luci-app-openclash.control ] && awk -F': ' '\''\$1==\"Version\"{print \$2; exit}'\'' /usr/lib/opkg/info/luci-app-openclash.control" 2>/dev/null | tail -1)"
+  remote_tmp="/tmp/openclash_sync_remote_ver.$$"
+  $ssh_base "$user@$host" "opkg list-installed 2>/dev/null | awk '\''\$1==\"luci-app-openclash\"{print \$3; exit}'\''; [ -f /usr/lib/opkg/info/luci-app-openclash.control ] && awk -F': ' '\''\$1==\"Version\"{print \$2; exit}'\'' /usr/lib/opkg/info/luci-app-openclash.control" >"$remote_tmp" 2>>"$LOG"
+  remote_rc=$?
+  remote_ver="$(tail -1 "$remote_tmp" 2>/dev/null)"
+  rm -f "$remote_tmp"
+  if [ "$remote_rc" -ne 0 ]; then
+    log "[$name] remote OpenClash version check failed (rc=$remote_rc), skip deploy to avoid false missing"
+    node_status_set "$sec" error "OpenClash版本检测失败，跳过自动部署"
+    return 1
+  fi
   force="$(get_cfg "$sec" force_reinstall_mismatch 1)"
   need_deploy=0
   if [ -z "$remote_ver" ]; then
     need_deploy=1
-    log "[$name] remote OpenClash missing, will deploy local version $local_ver"
+    log "[$name] remote OpenClash package metadata missing, will deploy local version $local_ver"
   elif [ "$remote_ver" != "$local_ver" ] && [ "$force" = "1" ]; then
     need_deploy=1
     log "[$name] remote OpenClash version mismatch: remote=$remote_ver local=$local_ver, will reinstall"
@@ -108,12 +117,8 @@ ensure_remote_openclash() {
   [ "$need_deploy" = "1" ] || return 0
 
   node_status_set "$sec" deploying "部署 OpenClash 中"
-  backup="$(get_cfg "$sec" backup_before_deploy 1)"
-  ts="$(date '+%Y%m%d_%H%M%S')"
-
-  if [ "$backup" = "1" ]; then
-    $ssh_base "$user@$host" "mkdir -p /root/openclash_sync_remote_backup && tar -czf /root/openclash_sync_remote_backup/openclash_before_deploy_$ts.tgz /etc/config/openclash /etc/openclash /etc/init.d/openclash /usr/share/openclash /usr/lib/lua/luci/controller/openclash.lua /usr/lib/lua/luci/model/cbi/openclash /usr/lib/lua/luci/view/openclash /www/luci-static/resources/openclash /usr/share/ucitrack/luci-app-openclash.json /usr/lib/opkg/info/luci-app-openclash.* 2>/dev/null || true" >>"$LOG" 2>&1
-  fi
+  # Remote backup disabled: the main node is the source of truth and can redeploy configs.
+  # Keeping remote backups wastes limited OpenWrt overlay storage.
 
   payload="$(prepare_openclash_payload)"
   rsync -az -e "$rsync_ssh" "$payload" "$user@$host:/tmp/openclash_sync_openclash_payload.tgz" >>"$LOG" 2>&1 || return 1
@@ -130,6 +135,7 @@ ensure_remote_openclash() {
       fi
     fi
     /etc/init.d/openclash enable >/tmp/openclash_sync_enable.log 2>&1 || true
+    /etc/init.d/openclash start >/tmp/openclash_sync_start.log 2>&1 || true
     rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null || true
     /etc/init.d/rpcd restart >/tmp/openclash_sync_rpcd.log 2>&1 || true
     /etc/init.d/uhttpd restart >/tmp/openclash_sync_uhttpd.log 2>&1 || true
@@ -263,21 +269,24 @@ schedule_sync() {
 }
 
 periodic_loop() {
+  [ "${PERIODIC_SYNC:-0}" -gt 0 ] 2>/dev/null || { log "periodic safety sync disabled"; return 0; }
   log "periodic safety sync start, interval=${PERIODIC_SYNC}s"
+  trap 'kill "$SLEEP_PID" 2>/dev/null || true; exit 0' INT TERM
   while true; do
-    sleep "$PERIODIC_SYNC"
+    sleep "$PERIODIC_SYNC" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null || exit 0
     log "periodic safety sync tick"
     sync_once
   done
 }
 
 watch_loop() {
-  log "watch start (one-to-many monitor + periodic safety sync)"
-  status_set running "监听中"
-  sync_once
+  log "watch start (one-to-many monitor, change-trigger only)"
+  status_set running "监听中，仅主设备变更时同步"
   periodic_loop &
   PERIODIC_PID=$!
-  trap 'kill $PERIODIC_PID 2>/dev/null; exit 0' INT TERM
+  trap 'kill "$PERIODIC_PID" 2>/dev/null || true; exit 0' INT TERM
   while true; do
     inotifywait -m -r -e close_write,create,delete,move,attrib \
       --exclude '(/etc/openclash/(core|history|cache|run|logs|backup)/|\.log$|\.pid$)' \
@@ -393,7 +402,8 @@ case "$1" in
     echo "nodes_enabled=$(node_count_enabled)"
     echo "service_pids=$(pgrep -f '/usr/bin/openclash_sync.sh watch' | xargs 2>/dev/null)"
     echo "inotify_pids=$(pgrep -f 'inotifywait -m -r' | xargs 2>/dev/null)"
-    echo "periodic_pids=$(pgrep -f '^sleep 300$' | xargs 2>/dev/null)"
+    echo "periodic_sync=$(get_cfg "$MAIN" periodic_sync 0)"
+    echo "periodic_pids=$(pgrep -f 'sleep [0-9][0-9]*' | xargs 2>/dev/null)"
     if pgrep -f 'inotifywait -m -r' >/dev/null 2>&1; then echo "watching=1"; else echo "watching=0"; fi
     [ -f "$STATUS_FILE" ] && cat "$STATUS_FILE"
     for sec in $(uci -q show "$CONFIG" | sed -n "s/^$CONFIG\.\([^=]*\)=node$/\1/p"); do

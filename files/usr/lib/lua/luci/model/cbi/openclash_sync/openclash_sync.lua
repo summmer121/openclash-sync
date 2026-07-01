@@ -81,9 +81,9 @@ o.datatype = "uinteger"
 o.default = "5"
 o.size = 4
 
-o = s:option(Value, "periodic_sync", translate("兜底周期(秒)"), translate("重启/断网恢复后自动补偿"))
+o = s:option(Value, "periodic_sync", translate("兜底周期(秒)"), translate("0=关闭；仅需要周期补偿时再启用，默认只监听主设备变更"))
 o.datatype = "uinteger"
-o.default = "300"
+o.default = "0"
 o.size = 6
 
 o = s:option(Value, "log_file", translate("日志文件"))
@@ -173,7 +173,7 @@ o.default = "/root/.ssh/openclash_sync_known_hosts"
 o = n:option(Flag, "reload_remote", translate("同步后重载"))
 o.default = "1"
 
-o = n:option(Flag, "auto_deploy_openclash", translate("自动部署/修复"), translate("对端缺失或版本不一致时自动部署"))
+o = n:option(Flag, "auto_deploy_openclash", translate("自动部署/修复"), translate("高风险选项，默认关闭；仅在确认需要由主设备重装对端 OpenClash 时启用"))
 o.default = "0"
 
 function m.on_after_commit(self)

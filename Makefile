@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-openclash-sync
-PKG_VERSION:=1.0.0
+PKG_VERSION:=1.2.7
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 
@@ -14,8 +14,12 @@ define Package/$(PKG_NAME)
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=LuCI app for OpenClash realtime sync
-  DEPENDS:=+luci-base +luci-compat +rsync +inotifywait
+  DEPENDS:=+luci-base +luci-compat +rsync +inotifywait +openssh-client +sshpass
   PKGARCH:=all
+endef
+
+define Package/$(PKG_NAME)/conffiles
+/etc/config/openclash_sync
 endef
 
 define Package/$(PKG_NAME)/description

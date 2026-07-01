@@ -1,7 +1,7 @@
 config openclash_sync 'main'
 	option enabled '1'
 	option debounce '5'
-	option periodic_sync '300'
+	option periodic_sync '0'
 	option sync_config_file '1'
 	option sync_config_dir '1'
 	option sync_custom_dir '1'

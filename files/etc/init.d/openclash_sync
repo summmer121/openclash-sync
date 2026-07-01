@@ -26,7 +26,7 @@ cleanup_leftovers() {
 		[ -r "$d/cmdline" ] || continue
 		cmd="$(cat "$d/cmdline" 2>/dev/null | tr '\0' ' ')"
 		case "$cmd" in
-			*"/usr/bin/openclash_sync.sh watch"*|*"inotifywait -m -r"*"/etc/openclash"*|"sleep 300"*)
+			*"/usr/bin/openclash_sync.sh watch"*|*"inotifywait -m -r"*"/etc/openclash"*)
 				kill "$pid" 2>/dev/null || true
 			;;
 		esac
