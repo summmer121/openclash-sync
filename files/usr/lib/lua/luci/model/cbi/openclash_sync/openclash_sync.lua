@@ -39,6 +39,7 @@ else
 <td style="padding:6px 8px">地址</td>
 <td style="padding:6px 8px">连接</td>
 <td style="padding:6px 8px">OpenClash</td>
+<td style="padding:6px 8px">配置</td>
 <td style="padding:6px 8px">国内网</td>
 <td style="padding:6px 8px">科学上网</td>
 <td style="padding:6px 8px">版本</td>
@@ -62,19 +63,23 @@ else
 			or (px == "未知" and '<span style="color:#999">未知</span>' or '<span style="color:#d9534f">不通</span>')
 		local ts = n.last_sync ~= "" and n.last_sync or "-"
 		ts = ts:match("(%d+:%d+:%d+)$") or ts
+		-- 对端配置文件
+		local rcfg = esc(n.remote_config or "")
+		if rcfg == "" then rcfg = '<span style="color:#999">-</span>' end
 		lines[#lines + 1] = string.format(
-			'<tr><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s %s</td><td style="padding:5px 8px;color:#888">%s</td></tr>',
-			esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, cn_badge, px_txt, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or ""), esc(n.probe_time or "-")
+			'<tr><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s %s</td><td style="padding:5px 8px;color:#888">%s</td></tr>',
+			esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, rcfg, cn_badge, px_txt, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or ""), esc(n.probe_time or "-")
 		)
 	end
 	lines[#lines + 1] = '</table>'
 end
--- 操作按钮(重启服务 / 刷新状态)
+-- 操作按钮(立即同步 / 重启服务 / 刷新状态)
 local act_url = disp.build_url("admin", "services", "openclash_sync", "action")
 lines[#lines + 1] = string.format([[
 <div style="margin-top:10px">
-<button type="button" class="btn cbi-button cbi-button-apply" id="ocs_btn_restart" style="margin-right:8px">重启服务</button>
-<button type="button" class="btn cbi-button cbi-button-reload" id="ocs_btn_refresh">刷新状态</button>
+<button type="button" class="btn cbi-button cbi-button-apply" id="ocs_btn_sync" style="margin-right:8px">立即同步</button>
+<button type="button" class="btn cbi-button cbi-button-reload" id="ocs_btn_restart" style="margin-right:8px">重启服务</button>
+<button type="button" class="btn cbi-button cbi-button-reset" id="ocs_btn_refresh">刷新状态</button>
 <span id="ocs_act_msg" style="margin-left:10px;color:#888"></span>
 </div>
 <script type="text/javascript">
@@ -101,8 +106,10 @@ lines[#lines + 1] = string.format([[
 		};
 		xhr.send("do=" + encodeURIComponent(act));
 	}
+	var bs = document.getElementById("ocs_btn_sync");
 	var br = document.getElementById("ocs_btn_restart");
 	var bf = document.getElementById("ocs_btn_refresh");
+	if(bs) bs.onclick = function(){ doAct("sync", "同步"); };
 	if(br) br.onclick = function(){ doAct("restart", "重启服务"); };
 	if(bf) bf.onclick = function(){ doAct("refresh", "刷新状态"); };
 })();

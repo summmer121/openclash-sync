@@ -67,6 +67,14 @@ sync_dir_to_node() {
 }
 
 # ---- 节点选择同步 (方案A: 主设备切节点 -> 从设备跟切同名节点) ----
+# 读本机当前选中的配置文件名(不含路径)
+_local_config_name() {
+  local cp
+  cp="$(uci -q get openclash.config.config_path 2>/dev/null)" || return 1
+  [ -n "$cp" ] || return 1
+  basename "$cp"
+}
+
 # 读本机所有 Selector 组的当前选中，输出每组两行: 组名\n节点名
 _local_selections() {
   local api="http://127.0.0.1:$CLASH_API"
@@ -100,18 +108,43 @@ sync_selection_node() {
     ssh_base="ssh -i $key -o StrictHostKeyChecking=no -o UserKnownHostsFile=$known -o ConnectTimeout=15 -p $port"
   fi
 
-  # 每组两行(组名/节点名)通过 stdin 传给对端，对端逐组 PUT 到自己的 9090
+  # 1) 先同步主节点当前配置文件到从节点(确保两边跑同一个yaml)
+  local main_cfg
+  main_cfg="$(_local_config_name)" || true
+  if [ -n "$main_cfg" ] && get_bool_sec "$MAIN" sync_config_file 1; then
+    $ssh_base "$user@$host" "
+      remote_cp=\$(uci -q get openclash.config.config_path 2>/dev/null)
+      remote_bn=\$(basename \"\$remote_cp\" 2>/dev/null)
+      if [ \"\$remote_bn\" != '$main_cfg' ]; then
+        echo 'config switch: '\$remote_bn' -> $main_cfg'
+        uci set openclash.config.config_path='/etc/openclash/config/$main_cfg'
+        uci commit openclash.config 2>/dev/null || true
+        /etc/init.d/openclash restart >/tmp/openclash_sync_reload.log 2>&1 || true
+        # 等待 Clash 核心就绪(API 可用，restart较慢)
+        for i in $(seq 1 15); do
+          curl -s -m3 \"http://127.0.0.1:$CLASH_API/version\" >/dev/null 2>&1 && break
+          sleep 2
+        done
+      fi
+    " >>"$LOG" 2>&1
+  fi
+
+  # 2) 每组两行(组名/节点名)通过 stdin 传给对端，对端逐组 PUT 到自己的 9090
+  # 使用 python3/urlencode 避免 emoji 组名在 ash 中解析异常
   printf '%s\n' "$selections" | $ssh_base "$user@$host" '
     api="http://127.0.0.1:'"$CLASH_API"'"
     changed=0
-    while read grp; do
-      read node || break
+    while IFS= read -r grp; do
+      IFS= read -r node || break
       [ -z "$grp" ] && continue
+      # URL encode 组名，兼容 emoji/中文
+      enc_grp=$(printf "%s" "$grp" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || printf "%s" "$grp")
       # 对端存在该组才切
-      cur=$(curl -s -m5 "$api/proxies/$grp" 2>/dev/null | jsonfilter -e "@.now" 2>/dev/null)
+      cur=$(curl -s -m5 "$api/proxies/$enc_grp" 2>/dev/null | jsonfilter -e "@.now" 2>/dev/null)
       [ -z "$cur" ] && continue
       [ "$cur" = "$node" ] && continue
-      code=$(curl -s -m8 -o /dev/null -w "%{http_code}" -X PUT --data "{\"name\":\"$node\"}" "$api/proxies/$grp" 2>/dev/null)
+      enc_node=$(printf "%s" "$node" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || printf "%s" "$node")
+      code=$(curl -s -m8 -o /dev/null -w "%{http_code}" -X PUT --data "{\"name\":\"$node\"}" "$api/proxies/$enc_grp" 2>/dev/null)
       [ "$code" = "204" ] && changed=$((changed+1)) && echo "switched [$grp] -> $node"
     done
     echo "selection_changed=$changed"
@@ -311,7 +344,19 @@ sync_node() {
   fi
 
   if [ "$reload" = "1" ]; then
-    $ssh_base "$user@$host" "/etc/init.d/openclash reload >/tmp/openclash_sync_reload.log 2>&1 || /etc/init.d/openclash restart >/tmp/openclash_sync_reload.log 2>&1 || true" >>"$LOG" 2>&1
+    # 检测从节点 config_path 是否与当前加载的 yaml 一致，不一致则必须 restart
+    $ssh_base "$user@$host" '
+      cur_cfg=$(uci -q get openclash.config.config_path 2>/dev/null)
+      cur_cfg_bn=$(basename "$cur_cfg" 2>/dev/null)
+      running_yaml=$(ps -w | grep "[c]lash" | grep -o "/etc/openclash/[^ ]*\.yaml" | head -1)
+      running_bn=$(basename "$running_yaml" 2>/dev/null)
+      if [ -n "$cur_cfg_bn" ] && [ -n "$running_bn" ] && [ "$cur_cfg_bn" != "$running_bn" ]; then
+        echo "config mismatch: running=$running_bn config=$cur_cfg_bn, need restart" >>/tmp/openclash_sync_reload.log 2>&1
+        /etc/init.d/openclash restart >>/tmp/openclash_sync_reload.log 2>&1 || true
+      else
+        /etc/init.d/openclash reload >>/tmp/openclash_sync_reload.log 2>&1 || /etc/init.d/openclash restart >>/tmp/openclash_sync_reload.log 2>&1 || true
+      fi
+    ' >>"$LOG" 2>&1
   fi
 
   log "[$name] sync done"
@@ -520,6 +565,25 @@ _peer_status_real() {
       done
       echo "px_net=$px_net"
       echo "px_loc=$px_ip"
+
+      # 对端当前配置文件
+      rcp=$(uci -q get openclash.config.config_path 2>/dev/null)
+      [ -n "$rcp" ] && echo "remote_config=$(basename "$rcp")" || echo "remote_config="
+
+      # 对端节点选择(仅 Global/Selector 组的 now)
+      rport=$(uci -q get openclash.config.cn_port 2>/dev/null)
+      [ -z "$rport" ] && rport=9090
+      rpx_json=$(curl -s -m5 "http://127.0.0.1:$rport/proxies" 2>/dev/null)
+      if [ -n "$rpx_json" ]; then
+        rpx_sel=""
+        for gn in $(echo "$rpx_json" | jsonfilter -e '@.proxies[@.type="Selector"].name' 2>/dev/null); do
+          gnow=$(echo "$rpx_json" | jsonfilter -e "@.proxies[\"$gn\"].now" 2>/dev/null)
+          [ -n "$gnow" ] && rpx_sel="${rpx_sel}${gn}▶${gnow}  "
+        done
+        echo "remote_selection=${rpx_sel}"
+      else
+        echo "remote_selection="
+      fi
     ' 2>/dev/null)"
     rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -533,6 +597,8 @@ _peer_status_real() {
       echo "cn_net=未知"
       echo "px_net=未知"
       echo "px_loc="
+      echo "remote_config="
+      echo "remote_selection="
     fi
     echo "END_NODE"
   done
