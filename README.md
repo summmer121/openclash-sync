@@ -205,8 +205,9 @@ luci-app-openclash-sync/
         ├── bin/openclash_sync.sh                    # 核心同步脚本
         └── lib/lua/luci/
             ├── controller/openclash_sync.lua        # 路由控制器
+            ├── model/cbi/openclash_sync.lua         # 配置页 CBI（LuCI实际加载）
             └── model/cbi/openclash_sync/
-                ├── openclash_sync.lua               # 配置页 CBI
+                ├── openclash_sync.lua               # 配置页 CBI（子目录副本）
                 └── status.lua                       # 状态/日志页 CBI
 ```
 
