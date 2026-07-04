@@ -8,74 +8,17 @@ local function esc(s)
 	return luci.util.pcdata(s or "")
 end
 
-local function parse_peer_status(text)
-	local nodes = {}
-	local cur = nil
-	for line in (text or ""):gmatch("[^\r\n]+") do
-		if line == "BEGIN_NODE" then cur = {}
-		elseif line == "END_NODE" then
-			if cur then nodes[#nodes + 1] = cur end
-			cur = nil
-		elseif cur then
-			local k, v = line:match("^([^=]+)=(.*)$")
-			if k then cur[k] = v end
-		end
-	end
-	return nodes
-end
-
--- 读缓存
-local peer_raw = sys.exec("/usr/bin/openclash_sync.sh peer-status 2>&1")
-local peers = parse_peer_status(peer_raw)
-
--- 纯文本卡片，不依赖table CSS
-local lines = {}
-if #peers == 0 then
-	lines[#lines + 1] = '<div style="color:#888;padding:8px">暂无节点</div>'
-else
-	lines[#lines + 1] = [[<table style="width:100%;border-collapse:collapse;font-size:12px">
-<tr style="font-weight:bold;border-bottom:2px solid">
-<td style="padding:6px 8px">节点</td>
-<td style="padding:6px 8px">地址</td>
-<td style="padding:6px 8px">连接</td>
-<td style="padding:6px 8px">OpenClash</td>
-<td style="padding:6px 8px">配置</td>
-<td style="padding:6px 8px">国内网</td>
-<td style="padding:6px 8px">科学上网</td>
-<td style="padding:6px 8px">版本</td>
-<td style="padding:6px 8px">最近同步</td>
-<td style="padding:6px 8px">结果</td>
-<td style="padding:6px 8px">刷新时间</td>
-</tr>]]
-	for i, n in ipairs(peers) do
-		local reachable = n.peer_reachable or "未知"
-		local badge = reachable == "yes" and '<span style="color:#5cb85c">在线</span>' or (reachable == "disabled" and "停用" or '<span style="color:#d9534f">离线</span>')
-		local oc = esc(n.openclash_state or "-")
-		if n.openclash_state == "running" then oc = '<span style="color:#5cb85c">运行</span>'
-		elseif n.openclash_state == "inactive" then oc = '<span style="color:#f0ad4e">停止</span>' end
-		-- 国内网络
-		local cn = n.cn_net or "未知"
-		local cn_badge = cn == "up" and '<span style="color:#5cb85c">正常</span>'
-			or (cn == "未知" and '<span style="color:#999">未知</span>' or '<span style="color:#d9534f">异常</span>')
-		-- 科学上网
-		local px = n.px_net or "未知"
-		local px_txt = px == "up" and ('<span style="color:#5cb85c">通</span>' .. (n.px_loc and n.px_loc ~= "" and (' <span style="color:#888">' .. esc(n.px_loc) .. '</span>') or ''))
-			or (px == "未知" and '<span style="color:#999">未知</span>' or '<span style="color:#d9534f">不通</span>')
-		local ts = n.last_sync ~= "" and n.last_sync or "-"
-		ts = ts:match("(%d+:%d+:%d+)$") or ts
-		-- 对端配置文件
-		local rcfg = esc(n.remote_config or "")
-		if rcfg == "" then rcfg = '<span style="color:#999">-</span>' end
-		lines[#lines + 1] = string.format(
-			'<tr><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s</td><td style="padding:5px 8px">%s %s</td><td style="padding:5px 8px;color:#888">%s</td></tr>',
-			esc(n.name or n.section or "-"), esc(n.target or "-"), badge, oc, rcfg, cn_badge, px_txt, esc(n.openclash_version or "-"), ts, esc(n.sync_state or "-"), esc(n.sync_message or ""), esc(n.probe_time or "-")
-		)
-	end
-	lines[#lines + 1] = '</table>'
-end
--- 操作按钮(立即同步 / 重启服务 / 刷新状态)
+-- 对端状态：先渲染骨架占位，AJAX异步加载
 local act_url = disp.build_url("admin", "services", "openclash_sync", "action")
-lines[#lines + 1] = string.format([[
+local peer_api_url = disp.build_url("admin", "services", "openclash_sync", "peer_status")
+
+local peer_placeholder = [[
+<div id="ocs_peer_container">
+  <div id="ocs_peer_loading" style="text-align:center;padding:24px;color:#888">
+    <span style="font-size:18px">⏳</span> 正在检测从节点状态...
+  </div>
+  <div id="ocs_peer_table" style="display:none"></div>
+</div>
 <div style="margin-top:10px">
 <button type="button" class="btn cbi-button cbi-button-apply" id="ocs_btn_sync" style="margin-right:8px">立即同步</button>
 <button type="button" class="btn cbi-button cbi-button-reload" id="ocs_btn_restart" style="margin-right:8px">重启服务</button>
@@ -84,37 +27,147 @@ lines[#lines + 1] = string.format([[
 </div>
 <script type="text/javascript">
 (function(){
-	var url = "%s";
-	function doAct(act, label){
-		var msg = document.getElementById("ocs_act_msg");
-		msg.style.color = "#888";
-		msg.innerHTML = label + "中…";
+	var peerUrl = "]] .. peer_api_url .. [[";
+	var actUrl = "]] .. act_url .. [[";
+
+	function escHtml(s) {
+		var d = document.createElement('div');
+		d.appendChild(document.createTextNode(s || ''));
+		return d.innerHTML;
+	}
+
+	function renderPeerTable(nodes) {
+		if (!nodes || nodes.length === 0) {
+			return '<div style="color:#888;padding:8px">暂无节点</div>';
+		}
+		var h = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+		h += '<tr style="font-weight:bold;border-bottom:2px solid">';
+		h += '<td style="padding:6px 8px">节点</td>';
+		h += '<td style="padding:6px 8px">地址</td>';
+		h += '<td style="padding:6px 8px">连接</td>';
+		h += '<td style="padding:6px 8px">OpenClash</td>';
+		h += '<td style="padding:6px 8px">配置</td>';
+		h += '<td style="padding:6px 8px">国内网</td>';
+		h += '<td style="padding:6px 8px">科学上网</td>';
+		h += '<td style="padding:6px 8px">版本</td>';
+		h += '<td style="padding:6px 8px">最近同步</td>';
+		h += '<td style="padding:6px 8px">结果</td>';
+		h += '<td style="padding:6px 8px">刷新时间</td>';
+		h += '</tr>';
+		for (var i = 0; i < nodes.length; i++) {
+			var n = nodes[i];
+			var reachable = n.peer_reachable || '未知';
+			var badge = reachable === 'yes' ? '<span style="color:#5cb85c">在线</span>'
+				: (reachable === 'disabled' ? '停用' : '<span style="color:#d9534f">离线</span>');
+			var oc = escHtml(n.openclash_state || '-');
+			if (n.openclash_state === 'running') oc = '<span style="color:#5cb85c">运行</span>';
+			else if (n.openclash_state === 'inactive') oc = '<span style="color:#f0ad4e">停止</span>';
+			var cn = n.cn_net || '未知';
+			var cn_badge = cn === 'up' ? '<span style="color:#5cb85c">正常</span>'
+				: (cn === '未知' ? '<span style="color:#999">未知</span>' : '<span style="color:#d9534f">异常</span>');
+			var px = n.px_net || '未知';
+			var px_txt = px === 'up' ? ('<span style="color:#5cb85c">通</span>' + (n.px_loc ? ' <span style="color:#888">' + escHtml(n.px_loc) + '</span>' : ''))
+				: (px === '未知' ? '<span style="color:#999">未知</span>' : '<span style="color:#d9534f">不通</span>');
+			var ts = n.last_sync || '-';
+			var m2 = ts.match(/(\d+:\d+:\d+)$/);
+			if (m2) ts = m2[1];
+			var rcfg = escHtml(n.remote_config || '');
+			if (!rcfg) rcfg = '<span style="color:#999">-</span>';
+			h += '<tr>';
+			h += '<td style="padding:5px 8px">' + escHtml(n.name || n.section || '-') + '</td>';
+			h += '<td style="padding:5px 8px">' + escHtml(n.target || '-') + '</td>';
+			h += '<td style="padding:5px 8px">' + badge + '</td>';
+			h += '<td style="padding:5px 8px">' + oc + '</td>';
+			h += '<td style="padding:5px 8px">' + rcfg + '</td>';
+			h += '<td style="padding:5px 8px">' + cn_badge + '</td>';
+			h += '<td style="padding:5px 8px">' + px_txt + '</td>';
+			h += '<td style="padding:5px 8px">' + escHtml(n.openclash_version || '-') + '</td>';
+			h += '<td style="padding:5px 8px">' + escHtml(ts) + '</td>';
+			h += '<td style="padding:5px 8px">' + escHtml(n.sync_state || '-') + ' ' + escHtml(n.sync_message || '') + '</td>';
+			h += '<td style="padding:5px 8px;color:#888">' + escHtml(n.probe_time || '-') + '</td>';
+			h += '</tr>';
+		}
+		h += '</table>';
+		return h;
+	}
+
+	function loadPeerStatus() {
+		var loading = document.getElementById('ocs_peer_loading');
+		var table = document.getElementById('ocs_peer_table');
+		if (loading) loading.style.display = '';
+		if (table) table.style.display = 'none';
 		var xhr = new XMLHttpRequest();
-		xhr.open("POST", url, true);
-		xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-		xhr.onreadystatechange = function(){
-			if(xhr.readyState === 4){
-				if(xhr.status === 200){
-					msg.style.color = "#5cb85c";
-					msg.innerHTML = label + "完成，正在刷新页面…";
-					setTimeout(function(){ location.reload(); }, 1500);
+		xhr.open('GET', peerUrl, true);
+		xhr.timeout = 30000;
+		xhr.onreadystatechange = function() {
+			if (xhr.readyState !== 4) return;
+			if (xhr.status === 200) {
+				try {
+					var data = JSON.parse(xhr.responseText);
+					var html = renderPeerTable(data.nodes || []);
+					if (table) {
+						table.innerHTML = html;
+						table.style.display = '';
+					}
+				} catch(e) {
+					if (table) {
+						table.innerHTML = '<div style="color:#d9534f;padding:8px">解析状态失败: ' + escHtml(e.message) + '</div>';
+						table.style.display = '';
+					}
+				}
+			} else {
+				if (table) {
+					table.innerHTML = '<div style="color:#d9534f;padding:8px">获取状态失败 (HTTP ' + xhr.status + ')</div>';
+					table.style.display = '';
+				}
+			}
+			if (loading) loading.style.display = 'none';
+		};
+		xhr.ontimeout = function() {
+			if (loading) loading.style.display = 'none';
+			if (table) {
+				table.innerHTML = '<div style="color:#f0ad4e;padding:8px">检测超时，从节点可能不可达</div>';
+				table.style.display = '';
+			}
+		};
+		xhr.send();
+	}
+
+	function doAct(act, label) {
+		var msg = document.getElementById('ocs_act_msg');
+		msg.style.color = '#888';
+		msg.innerHTML = label + '中…';
+		var xhr = new XMLHttpRequest();
+		xhr.open('POST', actUrl, true);
+		xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+		xhr.onreadystatechange = function() {
+			if (xhr.readyState === 4) {
+				if (xhr.status === 200) {
+					msg.style.color = '#5cb85c';
+					msg.innerHTML = label + '完成';
+					if (act === 'refresh' || act === 'sync') {
+						loadPeerStatus();
+					}
 				} else {
-					msg.style.color = "#d9534f";
-					msg.innerHTML = label + "失败 (HTTP " + xhr.status + ")";
+					msg.style.color = '#d9534f';
+					msg.innerHTML = label + '失败 (HTTP ' + xhr.status + ')';
 				}
 			}
 		};
-		xhr.send("do=" + encodeURIComponent(act));
+		xhr.send('do=' + encodeURIComponent(act));
 	}
-	var bs = document.getElementById("ocs_btn_sync");
-	var br = document.getElementById("ocs_btn_restart");
-	var bf = document.getElementById("ocs_btn_refresh");
-	if(bs) bs.onclick = function(){ doAct("sync", "同步"); };
-	if(br) br.onclick = function(){ doAct("restart", "重启服务"); };
-	if(bf) bf.onclick = function(){ doAct("refresh", "刷新状态"); };
+
+	var bs = document.getElementById('ocs_btn_sync');
+	var br = document.getElementById('ocs_btn_restart');
+	var bf = document.getElementById('ocs_btn_refresh');
+	if (bs) bs.onclick = function(){ doAct('sync', '同步'); };
+	if (br) br.onclick = function(){ doAct('restart', '重启服务'); };
+	if (bf) bf.onclick = function(){ doAct('refresh', '刷新状态'); };
+
+	// 页面加载后立即异步获取节点状态
+	loadPeerStatus();
 })();
-</script>]], act_url)
-local peer_html = table.concat(lines, "\n")
+</script>]]
 
 -- 对端状态
 peer_section = m:section(NamedSection, "main", "openclash_sync", translate("对端 OpenClash 状态"))
@@ -122,7 +175,7 @@ peer_section.addremove = false
 peer_section.anonymous = true
 pv = peer_section:option(DummyValue, "_peer_status", "")
 pv.rawhtml = true
-pv.default = peer_html
+pv.default = peer_placeholder
 
 -- 全局设置
 s = m:section(NamedSection, "main", "openclash_sync", translate("全局设置"))
@@ -183,7 +236,7 @@ function n.create(self, section)
 	m.uci:set("openclash_sync", sid, "remote_user", "root")
 	m.uci:set("openclash_sync", sid, "auth_mode", "key")
 	m.uci:set("openclash_sync", sid, "ssh_key", "/root/.ssh/openclash_sync_openssh_ed25519")
-	m.uci:set("openclash_sync", sid, "known_hosts", "/root/.ssh/openclash_sync_known_hosts")
+	m.uci:set("openclash_sync", sid, "known_hosts", "/root/.ssh/openclash_sync_openssh_known_hosts")
 	m.uci:set("openclash_sync", sid, "reload_remote", "1")
 	m.uci:set("openclash_sync", sid, "auto_deploy_openclash", "0")
 	return sid
@@ -225,7 +278,7 @@ o.default = "/root/.ssh/openclash_sync_openssh_ed25519"
 o:depends("auth_mode", "key")
 
 o = n:option(Value, "known_hosts", translate("KnownHosts"))
-o.default = "/root/.ssh/openclash_sync_known_hosts"
+o.default = "/root/.ssh/openclash_sync_openssh_known_hosts"
 
 o = n:option(Flag, "reload_remote", translate("同步后重载"))
 o.default = "1"

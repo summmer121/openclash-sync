@@ -9,6 +9,7 @@ function index()
 	entry({"admin", "services", "openclash_sync", "config"}, cbi("openclash_sync"), _("配置"), 10).leaf = true
 	entry({"admin", "services", "openclash_sync", "status"}, cbi("openclash_sync/status"), _("状态/日志"), 20).leaf = true
 	entry({"admin", "services", "openclash_sync", "action"}, call("action"), nil).leaf = true
+	entry({"admin", "services", "openclash_sync", "peer_status"}, call("action_peer_status"), nil).leaf = true
 end
 
 function action()
@@ -35,4 +36,29 @@ function action()
 
 	http.prepare_content("text/plain; charset=utf-8")
 	http.write(out)
+end
+
+function action_peer_status()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+	local raw = sys.exec("/usr/bin/openclash_sync.sh peer-status 2>&1")
+
+	-- Parse BEGIN_NODE...END_NODE blocks into JSON array
+	local json = require "luci.jsonc"
+	local nodes = {}
+	local cur = nil
+	for line in raw:gmatch("[^\r\n]+") do
+		if line == "BEGIN_NODE" then
+			cur = {}
+		elseif line == "END_NODE" then
+			if cur then nodes[#nodes + 1] = cur end
+			cur = nil
+		elseif cur then
+			local k, v = line:match("^([^=]+)=(.*)$")
+			if k then cur[k] = v end
+		end
+	end
+
+	http.prepare_content("application/json; charset=utf-8")
+	http.write(json.stringify({ nodes = nodes }))
 end
