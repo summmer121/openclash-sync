@@ -48,6 +48,10 @@ node_status_set() {
     echo "state=$state"
     echo "message=$msg"
   } > "$NODE_STATUS_DIR/$sec"
+  # 同步失败时立即清除对端状态缓存，避免页面显示旧数据与新结果矛盾
+  case "$state" in
+    error) rm -f /tmp/openclash_sync_peer_cache 2>/dev/null ;;
+  esac
 }
 
 node_count_enabled() {
