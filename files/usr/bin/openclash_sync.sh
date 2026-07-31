@@ -463,6 +463,71 @@ watch_loop() {
   done
 }
 
+local_status() {
+  local ver st en cn_net px_net px_ip pport rport rcp rpx_json rpx_sel
+  ver=$(opkg list-installed 2>/dev/null | awk '$1=="luci-app-openclash"{print $3; exit}')
+  [ -z "$ver" ] && [ -f /usr/lib/opkg/info/luci-app-openclash.control ] && ver=$(awk -F": " '$1=="Version"{print $2; exit}' /usr/lib/opkg/info/luci-app-openclash.control)
+  [ -z "$ver" ] && ver="未安装"
+  if [ -x /etc/init.d/openclash ]; then
+    st=$(/etc/init.d/openclash status 2>/dev/null || true)
+    case "$st" in
+      running) ;;
+      *) pgrep -f "clash" >/dev/null 2>&1 && st=running || st=inactive ;;
+    esac
+  else
+    st="未安装"
+  fi
+  en=$(/etc/init.d/openclash enabled >/dev/null 2>&1 && echo 1 || echo 0)
+
+  # 国内网络
+  cn_net="down"
+  if ping -c1 -W2 223.5.5.5 >/dev/null 2>&1; then
+    cn_net="up"
+  elif curl -s -m5 -o /dev/null http://www.baidu.com 2>/dev/null; then
+    cn_net="up"
+  fi
+
+  # 科学上网
+  px_net="down"; px_ip=""
+  pport=$(uci -q get openclash.config.mixed_port 2>/dev/null)
+  [ -z "$pport" ] && pport=7890
+  for P in "$pport" 7890 7891 7892 7893; do
+    code=$(curl -s -m8 -x "http://127.0.0.1:$P" -o /dev/null -w "%{http_code}" https://www.google.com/generate_204 2>/dev/null)
+    if [ "$code" = "204" ] || [ "$code" = "200" ]; then
+      px_net="up"
+      px_ip=$(curl -s -m8 -x "http://127.0.0.1:$P" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n "s/^loc=//p")
+      break
+    fi
+  done
+
+  # 当前配置文件
+  rcp=$(uci -q get openclash.config.config_path 2>/dev/null)
+  local local_config=""
+  [ -n "$rcp" ] && local_config=$(basename "$rcp")
+
+  # 节点选择
+  rport=$(uci -q get openclash.config.cn_port 2>/dev/null)
+  [ -z "$rport" ] && rport=9090
+  rpx_json=$(curl -s -m5 "http://127.0.0.1:$rport/proxies" 2>/dev/null)
+  rpx_sel=""
+  if [ -n "$rpx_json" ]; then
+    for gn in $(echo "$rpx_json" | jsonfilter -e '@.proxies[@.type="Selector"].name' 2>/dev/null); do
+      gnow=$(echo "$rpx_json" | jsonfilter -e "@.proxies[\"$gn\"].now" 2>/dev/null)
+      [ -n "$gnow" ] && rpx_sel="${rpx_sel}${gn}▶${gnow}  "
+    done
+  fi
+
+  echo "openclash_version=$ver"
+  echo "openclash_state=$st"
+  echo "openclash_enabled=$en"
+  echo "cn_net=$cn_net"
+  echo "px_net=$px_net"
+  echo "px_loc=$px_ip"
+  echo "local_config=$local_config"
+  echo "local_selection=$rpx_sel"
+  echo "probe_time=$(date '+%H:%M:%S')"
+}
+
 peer_status() {
   local cache_file="/tmp/openclash_sync_peer_cache"
   local cache_age=9999
@@ -630,6 +695,7 @@ case "$1" in
     done
     ;;
   peer-status) peer_status ;;
+  local-status) local_status ;;
   watch|"") watch_loop ;;
-  *) echo "Usage: $0 [once|sync-selection|watch|status|peer-status]"; exit 1 ;;
+  *) echo "Usage: $0 [once|sync-selection|watch|status|peer-status|local-status]"; exit 1 ;;
 esac

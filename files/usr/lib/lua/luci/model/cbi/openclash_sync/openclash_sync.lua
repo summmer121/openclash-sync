@@ -11,7 +11,18 @@ end
 -- 对端状态：先渲染骨架占位，AJAX异步加载
 local act_url = disp.build_url("admin", "services", "openclash_sync", "action")
 local peer_api_url = disp.build_url("admin", "services", "openclash_sync", "peer_status")
+local local_api_url = disp.build_url("admin", "services", "openclash_sync", "local_status")
 
+-- 本机状态卡片
+local local_placeholder = [[
+<div id="ocs_local_container" style="margin-bottom:12px">
+  <div style="font-weight:bold;padding:4px 0 6px 0;border-bottom:1px solid #eee;margin-bottom:6px">本机 OpenClash 状态</div>
+  <div id="ocs_local_loading" style="padding:8px;color:#888">⏳ 正在检测本机状态...</div>
+  <div id="ocs_local_table" style="display:none"></div>
+</div>
+]]
+
+-- 对端状态：先渲染骨架占位，AJAX异步加载
 local peer_placeholder = [[
 <div id="ocs_peer_container">
   <div id="ocs_peer_loading" style="text-align:center;padding:24px;color:#888">
@@ -29,11 +40,88 @@ local peer_placeholder = [[
 (function(){
 	var peerUrl = "]] .. peer_api_url .. [[";
 	var actUrl = "]] .. act_url .. [[";
+	var localUrl = "]] .. local_api_url .. [[";
 
 	function escHtml(s) {
 		var d = document.createElement('div');
 		d.appendChild(document.createTextNode(s || ''));
 		return d.innerHTML;
+	}
+
+	function renderLocalStatus(d) {
+		if (!d) return '<div style="color:#888;padding:8px">无数据</div>';
+		var oc = escHtml(d.openclash_state || '-');
+		if (d.openclash_state === 'running') oc = '<span style="color:#5cb85c">运行</span>';
+		else if (d.openclash_state === 'inactive') oc = '<span style="color:#f0ad4e">停止</span>';
+		else if (d.openclash_state === '未安装') oc = '<span style="color:#d9534f">未安装</span>';
+		var cn = d.cn_net || '未知';
+		var cn_badge = cn === 'up' ? '<span style="color:#5cb85c">正常</span>'
+			: (cn === '未知' ? '<span style="color:#999">未知</span>' : '<span style="color:#d9534f">异常</span>');
+		var px = d.px_net || '未知';
+		var px_txt = px === 'up' ? ('<span style="color:#5cb85c">通</span>' + (d.px_loc ? ' <span style="color:#888">' + escHtml(d.px_loc) + '</span>' : ''))
+			: (px === '未知' ? '<span style="color:#999">未知</span>' : '<span style="color:#d9534f">不通</span>');
+		var lcfg = escHtml(d.local_config || '');
+		if (!lcfg) lcfg = '<span style="color:#999">-</span>';
+		var sel = escHtml(d.local_selection || '');
+		if (!sel) sel = '<span style="color:#999">-</span>';
+		var auto = d.openclash_enabled === '1' ? '<span style="color:#5cb85c">已启用</span>' : '<span style="color:#f0ad4e">未启用</span>';
+		var h = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+		h += '<tr style="font-weight:bold;border-bottom:2px solid">';
+		h += '<td style="padding:6px 8px">OpenClash</td>';
+		h += '<td style="padding:6px 8px">开机自启</td>';
+		h += '<td style="padding:6px 8px">配置</td>';
+		h += '<td style="padding:6px 8px">国内网</td>';
+		h += '<td style="padding:6px 8px">科学上网</td>';
+		h += '<td style="padding:6px 8px">版本</td>';
+		h += '<td style="padding:6px 8px">节点选择</td>';
+		h += '<td style="padding:6px 8px">刷新时间</td>';
+		h += '</tr>';
+		h += '<tr>';
+		h += '<td style="padding:5px 8px">' + oc + '</td>';
+		h += '<td style="padding:5px 8px">' + auto + '</td>';
+		h += '<td style="padding:5px 8px">' + lcfg + '</td>';
+		h += '<td style="padding:5px 8px">' + cn_badge + '</td>';
+		h += '<td style="padding:5px 8px">' + px_txt + '</td>';
+		h += '<td style="padding:5px 8px">' + escHtml(d.openclash_version || '-') + '</td>';
+		h += '<td style="padding:5px 8px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + sel + '">' + sel + '</td>';
+		h += '<td style="padding:5px 8px;color:#888">' + escHtml(d.probe_time || '-') + '</td>';
+		h += '</tr>';
+		h += '</table>';
+		return h;
+	}
+
+	function loadLocalStatus() {
+		var loading = document.getElementById('ocs_local_loading');
+		var table = document.getElementById('ocs_local_table');
+		if (loading) loading.style.display = '';
+		if (table) table.style.display = 'none';
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET', localUrl, true);
+		xhr.timeout = 30000;
+		xhr.onreadystatechange = function() {
+			if (xhr.readyState !== 4) return;
+			if (loading) loading.style.display = 'none';
+			if (xhr.status === 200) {
+				try {
+					var data = JSON.parse(xhr.responseText);
+					if (table) {
+						table.innerHTML = renderLocalStatus(data);
+						table.style.display = '';
+					}
+				} catch(e) {
+					if (table) {
+						table.innerHTML = '<div style="color:#d9534f;padding:8px">解析失败: ' + escHtml(e.message) + '</div>';
+						table.style.display = '';
+					}
+				}
+			} else {
+				if (table) {
+					table.innerHTML = '<div style="color:#d9534f;padding:8px">获取失败 (HTTP ' + xhr.status + ')</div>';
+					table.style.display = '';
+				}
+			}
+		};
+		xhr.send();
 	}
 
 	function renderPeerTable(nodes) {
@@ -146,6 +234,7 @@ local peer_placeholder = [[
 					msg.style.color = '#5cb85c';
 					msg.innerHTML = label + '完成';
 					if (act === 'refresh' || act === 'sync') {
+						loadLocalStatus();
 						loadPeerStatus();
 					}
 				} else {
@@ -165,9 +254,18 @@ local peer_placeholder = [[
 	if (bf) bf.onclick = function(){ doAct('refresh', '刷新状态'); };
 
 	// 页面加载后立即异步获取节点状态
+	loadLocalStatus();
 	loadPeerStatus();
 })();
 </script>]]
+
+-- 本机状态
+local_section = m:section(NamedSection, "main", "openclash_sync", translate("本机 OpenClash 状态"))
+local_section.addremove = false
+local_section.anonymous = true
+lv = local_section:option(DummyValue, "_local_status", "")
+lv.rawhtml = true
+lv.default = local_placeholder
 
 -- 对端状态
 peer_section = m:section(NamedSection, "main", "openclash_sync", translate("对端 OpenClash 状态"))

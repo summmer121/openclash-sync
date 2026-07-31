@@ -10,6 +10,7 @@ function index()
 	entry({"admin", "services", "openclash_sync", "status"}, cbi("openclash_sync/status"), _("状态/日志"), 20).leaf = true
 	entry({"admin", "services", "openclash_sync", "action"}, call("action"), nil).leaf = true
 	entry({"admin", "services", "openclash_sync", "peer_status"}, call("action_peer_status"), nil).leaf = true
+	entry({"admin", "services", "openclash_sync", "local_status"}, call("action_local_status"), nil).leaf = true
 end
 
 function action()
@@ -61,4 +62,18 @@ function action_peer_status()
 
 	http.prepare_content("application/json; charset=utf-8")
 	http.write(json.stringify({ nodes = nodes }))
+end
+
+function action_local_status()
+	local http = require "luci.http"
+	local sys = require "luci.sys"
+	local raw = sys.exec("/usr/bin/openclash_sync.sh local-status 2>&1")
+	local json = require "luci.jsonc"
+	local data = {}
+	for line in raw:gmatch("[^\r\n]+") do
+		local k, v = line:match("^([^=]+)=(.*)$")
+		if k then data[k] = v end
+	end
+	http.prepare_content("application/json; charset=utf-8")
+	http.write(json.stringify(data))
 end
