@@ -161,6 +161,10 @@ local peer_placeholder = [[
 			if (m2) ts = m2[1];
 			var rcfg = escHtml(n.remote_config || '');
 			if (!rcfg) rcfg = '<span style="color:#999">-</span>';
+			// 结果列：本地化 + 颜色
+			var st = n.sync_state || '';
+			var st_txt = st === 'ok' ? '成功' : (st === 'syncing' ? '同步中' : (st === 'error' ? '失败' : (st || '-')));
+			var st_color = st === 'ok' ? '#5cb85c' : (st === 'syncing' ? '#f0ad4e' : (st === 'error' ? '#d9534f' : '#888'));
 			h += '<tr>';
 			h += '<td style="padding:5px 8px">' + escHtml(n.name || n.section || '-') + '</td>';
 			h += '<td style="padding:5px 8px">' + escHtml(n.target || '-') + '</td>';
@@ -171,7 +175,7 @@ local peer_placeholder = [[
 			h += '<td style="padding:5px 8px">' + px_txt + '</td>';
 			h += '<td style="padding:5px 8px">' + escHtml(n.openclash_version || '-') + '</td>';
 			h += '<td style="padding:5px 8px">' + escHtml(ts) + '</td>';
-			h += '<td style="padding:5px 8px">' + escHtml(n.sync_state || '-') + ' ' + escHtml(n.sync_message || '') + '</td>';
+			h += '<td style="padding:5px 8px"><span style="color:' + st_color + '">' + st_txt + '</span> ' + escHtml(n.sync_message || '') + '</td>';
 			h += '<td style="padding:5px 8px;color:#888">' + escHtml(n.probe_time || '-') + '</td>';
 			h += '</tr>';
 		}
