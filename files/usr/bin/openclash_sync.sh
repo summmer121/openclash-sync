@@ -491,11 +491,15 @@ local_status() {
   px_net="down"; px_ip=""
   pport=$(uci -q get openclash.config.mixed_port 2>/dev/null)
   [ -z "$pport" ] && pport=7890
+  puser=$(uci -q get openclash.@authentication[0].username 2>/dev/null)
+  ppass=$(uci -q get openclash.@authentication[0].password 2>/dev/null)
+  pen=$(uci -q get openclash.@authentication[0].enabled 2>/dev/null)
   for P in "$pport" 7890 7891 7892 7893; do
-    code=$(curl -s -m8 -x "http://127.0.0.1:$P" -o /dev/null -w "%{http_code}" https://www.google.com/generate_204 2>/dev/null)
+    if [ "$pen" = "1" ] && [ -n "$puser" ]; then PX="http://$puser:$ppass@127.0.0.1:$P"; else PX="http://127.0.0.1:$P"; fi
+    code=$(curl -s -m8 -x "$PX" -o /dev/null -w "%{http_code}" https://www.google.com/generate_204 2>/dev/null)
     if [ "$code" = "204" ] || [ "$code" = "200" ]; then
       px_net="up"
-      px_ip=$(curl -s -m8 -x "http://127.0.0.1:$P" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n "s/^loc=//p")
+      px_ip=$(curl -s -m8 -x "$PX" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n "s/^loc=//p")
       break
     fi
   done
@@ -624,11 +628,15 @@ _peer_status_real() {
       px_net="down"; px_ip=""
       pport=$(uci -q get openclash.config.mixed_port 2>/dev/null)
       [ -z "$pport" ] && pport=7890
+      puser=$(uci -q get openclash.@authentication[0].username 2>/dev/null)
+      ppass=$(uci -q get openclash.@authentication[0].password 2>/dev/null)
+      pen=$(uci -q get openclash.@authentication[0].enabled 2>/dev/null)
       for P in "$pport" 7890 7891 7892 7893; do
-        code=$(curl -s -m8 -x "http://127.0.0.1:$P" -o /dev/null -w "%{http_code}" https://www.google.com/generate_204 2>/dev/null)
+        if [ "$pen" = "1" ] && [ -n "$puser" ]; then PX="http://$puser:$ppass@127.0.0.1:$P"; else PX="http://127.0.0.1:$P"; fi
+        code=$(curl -s -m8 -x "$PX" -o /dev/null -w "%{http_code}" https://www.google.com/generate_204 2>/dev/null)
         if [ "$code" = "204" ] || [ "$code" = "200" ]; then
           px_net="up"
-          px_ip=$(curl -s -m8 -x "http://127.0.0.1:$P" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n "s/^loc=//p")
+          px_ip=$(curl -s -m8 -x "$PX" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n "s/^loc=//p")
           break
         fi
       done

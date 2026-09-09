@@ -220,6 +220,16 @@ luci-app-openclash-sync/
 5. **周期同步默认关闭** — 需要断网/重启补偿时再设置 `periodic_sync`，否则只监听主设备变更。
 6. **init stop 安全** — 进程清理通过 `/proc/cmdline` 精确匹配，不会误杀 SSH 管理会话。
 
+## 🔧 v1.3.4 更新内容
+
+### 关键修复
+- **配置页 `Model 'openclash_sync' not found!` 修复** — cbi 配置文件 `openclash_sync.lua` 原被误放在 `model/cbi/openclash_sync/` 子目录下，导致 LuCI controller `cbi("openclash_sync")` 找不到模型而报错。已移至 `model/cbi/openclash_sync.lua` 顶层（`model/cbi/openclash_sync/status.lua` 保留子目录，供 `cbi("openclash_sync/status")` 引用）。
+- **科学上网误判「不通」修复（OpenClash 代理认证 407）** — 外网探测走本机 Clash 代理端口时，若 OpenClash 开启了代理认证（`/etc/config/openclash` 的 `@authentication[0]`），原始探测 curl 未携带账号密码，Clash 返回 `407 Proxy Authentication Required`，被误判为 `px_net=down`。现探测逻辑自动读取 OpenClash 认证配置，有认证时用带账号密码的代理 URL 探测，无认证时保持原逻辑；本地状态（`local-status`）与对端状态（`peer-status`）两处探测均已修复。
+
+### 已验证
+- 本地及对端节点 `px_net=down` → `up`，成功获取出口位置 `px_loc`（如 HK）
+- 配置页正常渲染，`not found` 计数为 0
+
 ## 📄 License
 
 MIT
