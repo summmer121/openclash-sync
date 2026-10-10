@@ -220,6 +220,23 @@ luci-app-openclash-sync/
 5. **周期同步默认关闭** — 需要断网/重启补偿时再设置 `periodic_sync`，否则只监听主设备变更。
 6. **init stop 安全** — 进程清理通过 `/proc/cmdline` 精确匹配，不会误杀 SSH 管理会话。
 
+## 🔧 v1.3.5 更新内容
+
+### 关键修复：节点选择（selection）同步从未真正生效
+修复「对端一直停在旧节点 / 出口地域不一致（本机 US、对端 HK）」问题。根因是 `sync_selection` 的远程切换逻辑存在连环缺陷，导致对端 Clash API 的 `PUT /proxies/<组>` 从未成功过：
+
+- **对端调用缺鉴权头** — 对端 Clash API 设了 `secret`/`dashboard_password`，无鉴权的 `GET/PUT /proxies` 全部返回 `401`，选中切换被跳过。现本机读取与远端切换均自动携带 `Authorization: Bearer <secret>`。
+- **鉴权变量词分裂** — `curl ... $AH`（未加引号的 header 变量）会展开成多个独立参数导致 curl 误解析（http=000）。改为显式 `-H "Authorization: Bearer $apisec"`。
+- **空 secret `''` 陷阱** — 配置中 `secret: ''`（空字符串字面量）经 awk 取出的是 `''`（两个引号字符、非空），会跳过 `dashboard_password` 回退。已增加 `''` 判空剥离；并改为**优先读 `dashboard_password`**（其持有真实密钥），回退读 yaml secret。
+- **去掉 python3 依赖** — 原远程块用 `python3 urllib` 做 emoji/中文组名的 URL 编码，而 OpenWrt 路由器通常**无 python3**，导致编码永远回退失败。实测这些设备的 curl 直接支持原始 UTF-8 组名 URL（GET 200 / PUT 204），已移除 urlencode。
+- **新增远程 helper** — 多行 `while...do...done` 脚本内联在 ssh 命令参数中会在 BusyBox ash 下偶发 `syntax error: unexpected word (expecting "do")`。现改为部署独立脚本 `/usr/bin/openclash_sync_remote.sh` 到每台对端（读取 `组名\n节点名` 对、自行解析本机 secret、带鉴权 PUT），主节点仅执行 `sh /usr/bin/openclash_sync_remote.sh`，彻底绕开内联解析问题。
+
+### 已验证
+- 触发 `sync-selection` 后，两台对端（shuaishuai:922 / taizhou:622）的「🔰国外流量」均正确切换为 `Trojan-美国01中转`，出口地域与本机一致（US）
+- helper 自测 `printf '🔰国外流量\nTrojan-美国01中转\n' | sh openclash_sync_remote.sh` → `switched [...]` + `selection_changed=1`
+
+> 部署提醒：升级到 v1.3.5 后，需将 `files/usr/bin/openclash_sync_remote.sh` 一并部署到**每台对端**（`/usr/bin/openclash_sync_remote.sh`，`chmod 755`），否则 selection 同步会因找不到 helper 而失败。
+
 ## 🔧 v1.3.4 更新内容
 
 ### 关键修复

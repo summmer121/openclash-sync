@@ -83,7 +83,20 @@ _local_config_name() {
 _local_selections() {
   local api="http://127.0.0.1:$CLASH_API"
   local json="/tmp/openclash_sync_local_px.json"
-  curl -s -m5 "$api/proxies" > "$json" 2>/dev/null || return 1
+  # clash API may require auth: prefer dashboard_password, fall back to yaml secret
+  local apisec AH="" LCFG
+  apisec=$(uci -q get openclash.config.dashboard_password 2>/dev/null)
+  if [ -z "$apisec" ]; then
+    LCFG=$(uci -q get openclash.config.config_path 2>/dev/null)
+    [ -n "$LCFG" ] && [ -f "$LCFG" ] && apisec=$(grep -E "^secret:" "$LCFG" 2>/dev/null | head -1 | awk '{print $2}')
+    [ "$apisec" = "''" ] && apisec=
+  fi
+  [ -n "$apisec" ] && AH="Authorization: Bearer $apisec"
+  if [ -n "$AH" ]; then
+    curl -s -m5 -H "$AH" "$api/proxies" > "$json" 2>/dev/null || return 1
+  else
+    curl -s -m5 "$api/proxies" > "$json" 2>/dev/null || return 1
+  fi
   local n now
   for n in $(jsonfilter -i "$json" -e '@.proxies[@.type="Selector"].name' 2>/dev/null); do
     now="$(jsonfilter -i "$json" -e "@.proxies[\"$n\"].now" 2>/dev/null)"
@@ -133,26 +146,9 @@ sync_selection_node() {
     " >>"$LOG" 2>&1
   fi
 
-  # 2) 每组两行(组名/节点名)通过 stdin 传给对端，对端逐组 PUT 到自己的 9090
-  # 使用 python3/urlencode 避免 emoji 组名在 ash 中解析异常
-  printf '%s\n' "$selections" | $ssh_base "$user@$host" '
-    api="http://127.0.0.1:'"$CLASH_API"'"
-    changed=0
-    while IFS= read -r grp; do
-      IFS= read -r node || break
-      [ -z "$grp" ] && continue
-      # URL encode 组名，兼容 emoji/中文
-      enc_grp=$(printf "%s" "$grp" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || printf "%s" "$grp")
-      # 对端存在该组才切
-      cur=$(curl -s -m5 "$api/proxies/$enc_grp" 2>/dev/null | jsonfilter -e "@.now" 2>/dev/null)
-      [ -z "$cur" ] && continue
-      [ "$cur" = "$node" ] && continue
-      enc_node=$(printf "%s" "$node" | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip()))" 2>/dev/null || printf "%s" "$node")
-      code=$(curl -s -m8 -o /dev/null -w "%{http_code}" -X PUT --data "{\"name\":\"$node\"}" "$api/proxies/$enc_grp" 2>/dev/null)
-      [ "$code" = "204" ] && changed=$((changed+1)) && echo "switched [$grp] -> $node"
-    done
-    echo "selection_changed=$changed"
-  ' >>"$LOG" 2>&1
+  # 2) 每组两行(组名/节点名)通过 stdin 传给对端，调用对端本地 helper 逐组 PUT 到其 9090
+  # 对端 helper /usr/bin/openclash_sync_remote.sh 由部署方保证存在(鉴权+emoji URL 已内置处理)
+  printf '%s\n' "$selections" | $ssh_base "$user@$host" 'sh /usr/bin/openclash_sync_remote.sh' >>"$LOG" 2>&1
   local rc=$?
   if [ "$rc" -eq 0 ]; then
     log "[$name] selection synced"
